@@ -22,6 +22,12 @@ struct FolderAnalysis {
     categories: HashMap<String, Vec<FileInfo>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct FileMove {
+    from: String,
+    to: String,
+}
+
 // Smart file categorization logic
 fn categorize_file(file_info: &FileInfo) -> String {
     let file_name = file_info.name.to_lowercase();
@@ -248,14 +254,116 @@ async fn analyze_folder(folder_path: String) -> Result<FolderAnalysis, String> {
 }
 
 #[tauri::command]
-async fn organize_files(organization_plan: serde_json::Value) -> Result<String, String> {
-    println!("📁 Starting file organization...");
-    
-    // For now, just return success - we'll implement actual file moving later
-    // This prevents errors while we're building the UI
-    
-    println!("✅ Organization plan received: {}", organization_plan);
-    Ok("Organization plan ready! (File moving not implemented yet)".to_string())
+async fn organize_files(organization_plan: serde_json::Value) -> Result<serde_json::Value, String> {
+    use std::fs;
+    use std::path::Path;
+
+    let target_root = organization_plan.get("target_root")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'target_root' in organization plan")?;
+
+    let categories = organization_plan.as_object()
+        .ok_or("Organization plan is not an object")?;
+
+    let mut moved_files = 0;
+    let mut errors = Vec::new();
+    let mut moves: Vec<FileMove> = Vec::new();
+
+    for (category, files) in categories {
+        if category == "target_root" {
+            continue;
+        }
+        let files = match files.as_array() {
+            Some(arr) => arr,
+            None => continue,
+        };
+
+        let category_dir = Path::new(target_root).join(category);
+        if !category_dir.exists() {
+            if let Err(e) = fs::create_dir_all(&category_dir) {
+                errors.push(format!("Failed to create directory {:?}: {}", category_dir, e));
+                continue;
+            }
+        }
+
+        for file in files {
+            let src = match file.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => continue,
+            };
+            let file_name = match Path::new(src).file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let dest = category_dir.join(file_name);
+
+            if let Err(e) = fs::rename(src, &dest) {
+                errors.push(format!("Failed to move {}: {}", src, e));
+            } else {
+                moves.push(FileMove {
+                    from: src.to_string(),
+                    to: dest.to_string_lossy().to_string(),
+                });
+                moved_files += 1;
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(serde_json::json!({
+            "message": format!("✅ Organized {} files successfully!", moved_files),
+            "moves": moves
+        }))
+    } else {
+        Err(format!(
+            "Moved {} files, but some errors occurred:\n{}",
+            moved_files,
+            errors.join("\n")
+        ))
+    }
+}
+
+#[tauri::command]
+async fn undo_organize(moves: Vec<FileMove>) -> Result<String, String> {
+    use std::fs;
+
+    let mut errors = Vec::new();
+    let mut undone = 0;
+
+    // Collect unique parent directories of the 'to' paths before moving
+    let mut folders_to_check = std::collections::HashSet::new();
+    for file_move in &moves {
+        if let Some(parent) = Path::new(&file_move.to).parent() {
+            folders_to_check.insert(parent.to_path_buf());
+        }
+    }
+
+    for file_move in &moves {
+        if let Err(e) = fs::rename(&file_move.to, &file_move.from) {
+            errors.push(format!("Failed to move back {}: {}", file_move.to, e));
+        } else {
+            undone += 1;
+        }
+    }
+
+    // Remove empty folders
+    for folder in folders_to_check {
+        if folder.exists() && folder.read_dir().map(|mut i| i.next().is_none()).unwrap_or(false) {
+            // Move to trash (cross-platform, but you may need to add a crate like 'trash')
+            // For now, just remove the directory:
+            let _ = fs::remove_dir(&folder);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(format!("✅ Undo successful! Restored {} files.", undone))
+    } else {
+        Err(format!(
+            "Restored {} files, but some errors occurred:\n{}",
+            undone,
+            errors.join("\n")
+        ))
+    }
 }
 
 fn main() {
@@ -265,7 +373,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             select_folder,
             analyze_folder,
-            organize_files
+            organize_files,
+            undo_organize
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

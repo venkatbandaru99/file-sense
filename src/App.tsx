@@ -19,6 +19,8 @@ function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<FolderAnalysis | null>(null);
   const [error, setError] = useState<string>("");
+  const [orgResult, setOrgResult] = useState<string | null>(null);
+  const [lastMoves, setLastMoves] = useState<any[]>([]);
 
   async function selectFolder() {
     try {
@@ -70,6 +72,47 @@ function App() {
     };
     return icons[category] || "📁";
   };
+  const handleOrganizeFiles = async () => {
+  if (!analysis || !selectedFolder) {
+    setError("No analysis or folder selected.");
+    return;
+  }
+  try {
+    setError("");
+    setOrgResult(null);
+    setLastMoves([]);
+    const organizationPlan = {
+      target_root: selectedFolder,
+      ...analysis.categories
+    };
+    const result = await invoke<any>("organize_files", { organizationPlan });
+    setOrgResult(result.message);
+    setLastMoves(result.moves || []);
+  } catch (err) {
+    setOrgResult(`Failed to organize files: ${err}`);
+  }
+};
+const handlePreviewOrganization = () => {
+  if (!analysis || !selectedFolder) {
+    setError("No analysis or folder selected.");
+    return;
+  }
+  const summary = Object.entries(analysis.categories)
+    .map(([category, files]) => `${category}: ${files.length} file(s)`)
+    .join('\n');
+  alert(`Files will be organized into:\n${summary}\n\nTarget folder: ${selectedFolder}`);
+};
+const handleUndo = async () => {
+  if (!lastMoves.length) return;
+  try {
+    setError("");
+    const result = await invoke<string>("undo_organize", { moves: lastMoves });
+    setOrgResult(result);
+    setLastMoves([]);
+  } catch (err) {
+    setOrgResult(`Failed to undo: ${err}`);
+  }
+};
 
   return (
     <main className="container">
@@ -160,14 +203,28 @@ function App() {
 
           {/* Organization Actions */}
           <div className="actions">
-            <button className="action-button primary">
+            <button className="action-button primary" onClick={handleOrganizeFiles}>
               ✅ Organize Files
             </button>
-            <button className="action-button secondary">
+            <button className="action-button secondary" onClick={handlePreviewOrganization}>
               👀 Preview Organization
             </button>
           </div>
         </section>
+      )}
+
+      {/* Organization Result */}
+      {orgResult && (
+        <div className="org-result-message">
+          {orgResult}
+          {lastMoves.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <button onClick={handleUndo} className="action-button secondary">
+                Undo
+              </button>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Getting Started */}
